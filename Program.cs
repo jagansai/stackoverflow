@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -20,7 +21,7 @@ namespace ConsoleApplicationCS
         static string version_ = ConfigurationManager.AppSettings["version"];
 
 
-        private static async Task<Type> ProcessStackOverFlowQuery<Type>(string url) where Type : new()
+        private static async Task<Type> ProcessStackOverFlowQueryAsync<Type>(string url) where Type : new()
         {
             try
             {
@@ -42,24 +43,45 @@ namespace ConsoleApplicationCS
                 throw ex;
             }
         }
+        private static Type ProcessStackOverFlowQuery<Type>(string url) where Type : new()
+        {
+            try
+            {
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+                request.AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip;
+                using (var response = (HttpWebResponse)request.GetResponse())
+                {
+                    using (var reader = new StreamReader(response.GetResponseStream()))
+                    {
+                        JavaScriptSerializer serializer = new JavaScriptSerializer();
+                        return serializer.Deserialize<Type>(reader.ReadToEnd());
+                    }
+                }
 
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(string.Format("Exception raised when querying with the request:{0}", url));
+                throw ex;
+            }
+        }
 
-        public static async Task QueryQuestionWithId()
+        public static void QueryQuestionWithId()
         {
             int id = 124797;
             string url = "https://api.stackexchange.com/{0}/questions/{1}?site={2}";
-            QuestionInfo info = await ProcessStackOverFlowQuery<QuestionInfo>(string.Format(url, version_, id, site_));
+            QuestionInfo info = ProcessStackOverFlowQuery<QuestionInfo>(string.Format(url, version_, id, site_));
             Console.WriteLine(info.ToString());
         }
 
-        public static async Task QueryTaggedQuestions()
+        public static void QueryTaggedQuestions()
         {
             int i = 1;
             string url = "https://api.stackexchange.com/{0}/questions?page={1}&pagesize=30&order=desc&sort=creation&tagged={2}&site={3}";
 
             do
             {
-                QuestionInfo info = await ProcessStackOverFlowQuery<QuestionInfo>(string.Format(url, version_, i++, "c++", site_));
+                QuestionInfo info = ProcessStackOverFlowQuery<QuestionInfo>(string.Format(url, version_, i++, "c++", site_));
                 Console.WriteLine(info.ToString());
                 if (info.info.has_more)
                 {
@@ -74,19 +96,44 @@ namespace ConsoleApplicationCS
         }
 
 
-        private static async Task<AnswerInfo> AnswerWithFilters(int id)
+        private static async Task<AnswerInfo> AnswerWithFiltersAsync(int id)
         {
             string answerFilter = ConfigurationManager.AppSettings["answerfilter"];
             string url = "https://api.stackexchange.com/{0}/answers/{1}?order=desc&sort=creation&site={2}&filter={3}";
 
-            return await ProcessStackOverFlowQuery<AnswerInfo>(string.Format(url, version_, id, site_, answerFilter));
+            return await ProcessStackOverFlowQueryAsync<AnswerInfo>(string.Format(url, version_, id, site_, answerFilter));
         }
 
-        private static async Task<CommentInfo> CommentWithFilters(int id)
+        private static Answer AnswerWithFilters(int id)
+        {
+            string answerFilter = ConfigurationManager.AppSettings["answerfilter"];
+            string url = "https://api.stackexchange.com/{0}/answers/{1}?order=desc&sort=creation&site={2}&filter={3}";
+
+            return ProcessStackOverFlowQuery<AnswerInfo>(string.Format(url, version_, id, site_, answerFilter)).items[0];
+        }
+
+        private static async Task<CommentInfo> CommentWithFiltersAsync(int id)
         {
             string commentfilter = ConfigurationManager.AppSettings["commentfilter"];
             string url = "https://api.stackexchange.com/{0}/comments/{1}?order=desc&sort=creation&site={2}&filter={3}";
-            return await ProcessStackOverFlowQuery<CommentInfo>(string.Format(url, version_, id, site_, commentfilter));
+            return await ProcessStackOverFlowQueryAsync<CommentInfo>(string.Format(url, version_, id, site_, commentfilter));
+        }
+
+        private static Comment CommentWithFilters(int id)
+        {
+            string commentfilter = ConfigurationManager.AppSettings["commentfilter"];
+            string url = "https://api.stackexchange.com/{0}/comments/{1}?order=desc&sort=creation&site={2}&filter={3}";
+            return ProcessStackOverFlowQuery<CommentInfo>(string.Format(url, version_, id, site_, commentfilter)).items[0];
+        }
+
+        
+
+        private static void WriteCommentsToStream(IList<Task<Comment>> comments, Stream stream, Action<Stream, byte[]> writeToStream)
+        {
+            foreach(var comment in comments)
+            {
+                writeToStream(stream, Encoding.UTF8.GetBytes(comment.Result.body + "\n"));
+            }
         }
 
 
@@ -107,6 +154,24 @@ namespace ConsoleApplicationCS
                 WriteCommentsToStream(answer.comments, stream, writeToStream);
             }
         }
+
+        private static IList<Task<Comment>> GetComments(IList<Comment> comments)
+        {
+            var commentsWithBody = new List<Task<Comment>>();
+            
+            if (comments != null)
+            {
+                foreach (var comment in comments)
+                {
+                    //CommentWithFilters(comment.comment_id).ContinueWith<CommentInfo>( commentWithBody => {
+                    //    commentsWithBody.Add(commentWithBody.Result.items[0].body);
+                    var commentWithBody = Task.Factory.StartNew<Comment>(() => { return CommentWithFilters(comment.comment_id); });
+                    commentsWithBody.Add(commentWithBody);
+                }
+            }
+            return commentsWithBody;
+        }
+
        
         private static async Task<IList<Comment>> GetCommentsAsync(IList<Comment> comments)
         {
@@ -115,20 +180,21 @@ namespace ConsoleApplicationCS
             {
                 foreach (var comment in comments)
                 {
-                    CommentWithFilters(comment.comment_id).ContinueWith<CommentInfo>( commentWithBody => {
-                        commentsWithBody.Add(commentWithBody.Result.items[0].body);
-                    });
+                    //CommentWithFilters(comment.comment_id).ContinueWith<CommentInfo>( commentWithBody => {
+                    //    commentsWithBody.Add(commentWithBody.Result.items[0].body);
+                    CommentInfo commentWithBody = await CommentWithFiltersAsync(comment.comment_id);
+                    commentsWithBody.Add(commentWithBody.items[0]);
                 }
             }
             return commentsWithBody;
         }
 
-        private static async Task QuestionWithFilters()
+        private static void QuestionWithFilters()
         {
             string questionfilter = ConfigurationManager.AppSettings["questionfilter"];
             string url = "https://api.stackexchange.com/{0}/questions/23010736?order=desc&sort=activity&site={1}&filter={2}";
 
-            QuestionInfo info = await ProcessStackOverFlowQuery<QuestionInfo>(string.Format(url, version_, site_, questionfilter));
+            QuestionInfo info = ProcessStackOverFlowQuery<QuestionInfo>(string.Format(url, version_, site_, questionfilter));
             
             // Query the question and if it has answers, then get the answers.
             // if it has comments, then get the comments
@@ -156,9 +222,13 @@ namespace ConsoleApplicationCS
 
                 int length = info.items[0].body.Length;
                 writeToStream(stream, Encoding.UTF8.GetBytes(info.items[0].body + "\n"));
-                var commentsWithBody = await GetCommentsAsync(info.items[0].comments);
-                var answersWithBody = await GetAnswersAsync(info.items[0].answers);
+                //var commentsWithBody = await GetCommentsAsync(info.items[0].comments);
+                //var answersWithBody = await GetAnswersAsync(info.items[0].answers);
 
+
+                var commentsWithBody = GetComments(info.items[0].comments);
+                var answersWithBody = GetAnswers(info.items[0].answers);
+                
 
                 // Now write everything to a file.
                 WriteCommentsToStream(commentsWithBody, stream, writeToStream);
@@ -176,7 +246,7 @@ namespace ConsoleApplicationCS
             {
                 foreach (var answer in answers)
                 {
-                    AnswerInfo answerWithBody = await AnswerWithFilters(answer.answer_id);
+                    AnswerInfo answerWithBody = await AnswerWithFiltersAsync(answer.answer_id);
                     answersWithBody.Add(answerWithBody.items[0]);
                     var commentsWithBody = await GetCommentsAsync(answer.comments);
                     answersWithBody[index++].comments = commentsWithBody;
@@ -185,13 +255,49 @@ namespace ConsoleApplicationCS
             return answersWithBody;
         }
 
+        private static IList<Answer> GetAnswers(IList<Answer> answers)
+        {
+            List<Answer> answersWithBody = new List<Answer>();
+            var commentTasks = new List<Task<List<Comment>>>();
+            
+            int index = 0;
+
+            if (answers != null)
+            {
+                foreach (var answer in answers)
+                {
+                    var task = Task.Factory.StartNew<Answer>(() =>
+                    { 
+                        Answer answerWithBody = AnswerWithFilters(answer.answer_id);
+                        answersWithBody.Add(answerWithBody);
+                        return answerWithBody;
+                    }).ContinueWith<List<Comment>>((continuation) =>
+                    {
+                        var commentWithBody = new List<Comment>();
+                        foreach(var commentTask in GetComments(continuation.Result.comments))
+                        {
+                            commentWithBody.Add(commentTask.Result); 
+                        }
+                        return commentWithBody;
+                    });
+                    commentTasks.Add(task);
+                }
+            }
+
+            foreach(var commentTask in commentTasks)
+            {
+                answersWithBody[index++].comments = commentTask.Result;
+            }
+
+            return answersWithBody;
+        }
+
         static void Main(string[] args)
         {
-
             try
             {
                 Dictionary<int, string> methodNamesMap = new Dictionary<int, string>();
-                Dictionary<int, Func<Task>> methodMaps = new Dictionary<int, Func<Task>>();
+                Dictionary<int, Action> methodMaps = new Dictionary<int, Action>();
 
                 methodNamesMap.Add(1, "QueryTaggedQuestions");
                 methodNamesMap.Add(2, "QueryQuestionWithId");
@@ -216,8 +322,7 @@ namespace ConsoleApplicationCS
 
                     Utils.TimeTaken(() =>
                     {
-                        Task t = methodMaps[choice]();
-                        t.Wait();
+                        methodMaps[choice]();
                     }, string.Format("Executing {0}", methodNamesMap[choice]));
                 }
 
